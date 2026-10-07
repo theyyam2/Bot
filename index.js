@@ -12,14 +12,15 @@ app.listen(port, () => {
 
 const { default: makeWASocket, useMultiFileAuthState, disconnectReason } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
+const pino = require('pino');
 const path = require('path');
 
 async function startBot() {
-    // താൽക്കാലിക ഫോൾഡറിലേക്ക് സെഷൻ മാറ്റുന്നു
     const { state, saveCreds } = await useMultiFileAuthState(path.join('/tmp', 'auth_info_baileys'));
     
     const sock = makeWASocket({
         auth: state,
+        logger: pino({ level: 'silent' }),
         printQRInTerminal: true,
         browser: ["Theyyam Bot", "Chrome", "1.0.0"]
     });
@@ -30,14 +31,16 @@ async function startBot() {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
-            console.log("\n👇 താഴെ കാണുന്ന QR കോഡ് വാട്സ്ആപ്പിൽ സ്കാൻ ചെയ്യുക:\n");
+            console.log("\n==========================================");
+            console.log("👇 താഴെ കാണുന്ന QR കോഡ് വാട്സ്ആപ്പിൽ സ്കാൻ ചെയ്യുക:");
+            console.log("==========================================");
             qrcode.generate(qr, { small: true });
         }
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const shouldReconnect = statusCode !== disconnectReason.loggedOut;
-            console.log('കണക്ഷൻ ക്ലോസ് ആയി, വീണ്ടും ശ്രമിക്കുന്നു...', shouldReconnect);
+            console.log('കണക്ഷൻ ക്ലോസ് ആയി, വീണ്ടും റീസ്റ്റാർട്ട് ചെയ്യുന്നു...', shouldReconnect);
             if (shouldReconnect) {
                 setTimeout(startBot, 3000);
             }
@@ -63,7 +66,8 @@ async function startBot() {
             const isGoogleMap = /maps\.google\.com|maps\.app\.goo\.gl/gi.test(text);
 
             if (hasLink && !isGoogleMap) {
-                // സന്ദേശം ഡിലീറ്റ് ചെയ്യുന്നു
+                console.log("അനാവശ്യ ലിങ്ക് കണ്ടെത്തി! ഡിലീറ്റ് ചെയ്യാൻ ശ്രമിക്കുന്നു...");
+                
                 await sock.sendMessage(chat, { 
                     delete: {
                         remoteJid: chat,
@@ -73,7 +77,6 @@ async function startBot() {
                     }
                 });
 
-                // വാണിംഗ് അയക്കുന്നു
                 const sender = msg.key.participant;
                 if (sender) {
                     await sock.sendMessage(chat, {

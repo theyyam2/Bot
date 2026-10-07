@@ -1,94 +1,52 @@
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
-const qrcode = require('qrcode-terminal');
-const { MongoClient } = require('mongodb');
+const QRCode = require('qrcode');
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion,
-    Browsers,
-    initAuthCreds,
-    BufferJSON,
-    proto
+    Browsers
 } = require('@whiskeysockets/baileys');
 
-/* ============ Keep-alive സെർവർ ============ */
+/* ============ വെബ് സെർവർ (+ QR പേജ്) ============ */
 const app = express();
 const port = process.env.PORT || 10000;
-app.get('/', (req, res) => res.send('തെയ്യം വാട്സ്ആപ്പ് ബോട്ട് റണ്ണിംഗ് ആണ്! 🤖'));
-app.listen(port, () => console.log(`Keep-Alive സർവ്വീസ് പോർട്ട് ${port}-ൽ സ്റ്റാർട്ട് ആയി!`));
 
-// Render ഫ്രീ പ്ലാൻ ഉറങ്ങാതിരിക്കാൻ ഓരോ 10 മിനിറ്റിലും സ്വന്തം URL പിംഗ് ചെയ്യുന്നു
-const SELF_URL = process.env.RENDER_EXTERNAL_URL;
-if (SELF_URL) {
-    setInterval(() => {
-        fetch(SELF_URL).then(() => console.log('🔄 self-ping ok')).catch(() => {});
-    }, 10 * 60 * 1000);
-}
+let latestQR = null;
+let connected = false;
+
+app.get('/', (req, res) => res.send('തെയ്യം വാട്സ്ആപ്പ് ബോട്ട് റണ്ണിംഗ് ആണ്! 🤖'));
+
+app.get('/qr', async (req, res) => {
+    // ഓപ്ഷണൽ: Render env-ൽ QR_KEY ഇട്ടാൽ /qr?key=... എന്ന് മാത്രമേ തുറക്കൂ
+    if (process.env.QR_KEY && req.query.key !== process.env.QR_KEY) {
+        return res.status(403).send('അനുവാദമില്ല');
+    }
+    if (connected) {
+        return res.send('<h2 style="font-family:sans-serif;text-align:center">✅ ബോട്ട് കണക്ട് ആണ്. QR ആവശ്യമില്ല.</h2>');
+    }
+    if (!latestQR) {
+        return res.send('<p style="font-family:sans-serif;text-align:center">QR തയ്യാറാകുന്നു... കുറച്ച് സെക്കൻഡ് കാത്തിരിക്കൂ.</p><script>setTimeout(()=>location.reload(),4000)</script>');
+    }
+    const img = await QRCode.toDataURL(latestQR, { width: 320, margin: 2 });
+    res.send(`<html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="text-align:center;font-family:sans-serif">
+<h3>വാട്സ്ആപ്പ് → Linked devices → Link a device → ഈ QR സ്കാൻ ചെയ്യുക</h3>
+<img src="${img}" width="320" height="320">
+<p>QR ഇടയ്ക്കിടെ മാറും, പേജ് സ്വയം പുതുക്കും.</p>
+<script>setTimeout(()=>location.reload(),10000)</script>
+</body></html>`);
+});
+
+app.listen(port, () => console.log(`വെബ് സർവ്വീസ് പോർട്ട് ${port}-ൽ സ്റ്റാർട്ട് ആയി!`));
 
 process.on('uncaughtException', (e) => console.log('uncaughtException:', e));
 process.on('unhandledRejection', (e) => console.log('unhandledRejection:', e));
 
-/* ============ MongoDB-ൽ സെഷൻ സൂക്ഷിക്കൽ ============ */
-async function useMongoAuthState(collection) {
-    const write = (data, id) =>
-        collection.replaceOne({ _id: id }, { _id: id, data: JSON.stringify(data, BufferJSON.replacer) }, { upsert: true });
-    const read = async (id) => {
-        const doc = await collection.findOne({ _id: id });
-        return doc ? JSON.parse(doc.data, BufferJSON.reviver) : null;
-    };
-    const remove = (id) => collection.deleteOne({ _id: id });
-
-    const creds = (await read('creds')) || initAuthCreds();
-
-    return {
-        state: {
-            creds,
-            keys: {
-                get: async (type, ids) => {
-                    const data = {};
-                    await Promise.all(ids.map(async (id) => {
-                        let value = await read(`${type}-${id}`);
-                        if (type === 'app-state-sync-key' && value) {
-                            value = proto.Message.AppStateSyncKeyData.fromObject(value);
-                        }
-                        data[id] = value;
-                    }));
-                    return data;
-                },
-                set: async (data) => {
-                    const tasks = [];
-                    for (const category in data) {
-                        for (const id in data[category]) {
-                            const value = data[category][id];
-                            const key = `${category}-${id}`;
-                            tasks.push(value ? write(value, key) : remove(key));
-                        }
-                    }
-                    await Promise.all(tasks);
-                }
-            }
-        },
-        saveCreds: () => write(creds, 'creds')
-    };
-}
-
-let authCollection = null;
-async function getAuth() {
-    if (process.env.MONGODB_URI) {
-        if (!authCollection) {
-            const client = new MongoClient(process.env.MONGODB_URI);
-            await client.connect();
-            authCollection = client.db('theyyam_bot').collection('auth');
-            console.log('✅ MongoDB കണക്ട് ആയി (സെഷൻ സ്ഥിരമായി സൂക്ഷിക്കും)');
-        }
-        return useMongoAuthState(authCollection);
-    }
-    console.log('⚠️ MONGODB_URI ഇല്ല. സെഷൻ /tmp-ൽ (റീസ്റ്റാർട്ടിൽ മായും)');
-    return useMultiFileAuthState(path.join('/tmp', 'auth_info_baileys'));
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ============ ലിങ്ക് പരിശോധന ============ */
 const URL_RE = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
@@ -100,8 +58,10 @@ function hasBadLink(text) {
 }
 
 /* ============ ബോട്ട് ============ */
+const AUTH_DIR = path.join('/tmp', 'auth_info_baileys');
+
 async function startBot() {
-    const { state, saveCreds } = await getAuth();
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
@@ -113,48 +73,33 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // ---- ആദ്യ ലിങ്കിങ്: പെയറിങ് കോഡ് ----
-    const pairNumber = (process.env.PAIR_NUMBER || '').replace(/\D/g, '');
-    if (!sock.authState.creds.registered && pairNumber) {
-        setTimeout(async () => {
-            try {
-                const code = await sock.requestPairingCode(pairNumber);
-                console.log('\n🔑 പെയറിങ് കോഡ്:', code, '\n');
-            } catch (e) {
-                console.log('പെയറിങ് കോഡ് എടുക്കാൻ പറ്റിയില്ല:', e.message);
-            }
-        }, 3000);
-    }
-
-    sock.ev.on('connection.update', async (update) => {
+    sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr && !pairNumber) {
-            console.log('\n👇 QR കോഡ് (PAIR_NUMBER ഉപയോഗിക്കുന്നത് എളുപ്പമാണ്):');
-            qrcode.generate(qr, { small: true });
+        if (qr) {
+            latestQR = qr;
+            console.log('📲 QR തയ്യാറാണ്: https://<നിങ്ങളുടെ-render-url>/qr എന്ന പേജ് തുറന്ന് സ്കാൻ ചെയ്യുക');
         }
 
         if (connection === 'close') {
+            connected = false;
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             console.log('കണക്ഷൻ ക്ലോസ് ആയി. കോഡ്:', statusCode);
 
             if (statusCode === DisconnectReason.loggedOut) {
-                // വാട്സ്ആപ്പിൽ നിന്ന് ലോഗൗട്ട് ചെയ്തു: പഴയ സെഷൻ മായ്ച്ച് വീണ്ടും ലിങ്ക് ചെയ്യണം
+                // ലോഗൗട്ട് ആയി: പഴയ സെഷൻ മായ്ച്ച് പുതിയ QR ഉണ്ടാക്കുന്നു
                 console.log('⚠️ ലോഗൗട്ട് ആയി. സെഷൻ മായ്ക്കുന്നു...');
-                if (authCollection) await authCollection.deleteMany({});
-                if (pairNumber) {
-                    setTimeout(startBot, 3000);
-                } else {
-                    console.log('PAIR_NUMBER ചേർത്ത് വീണ്ടും ഡെപ്ലോയ് ചെയ്യുക.');
-                }
-            } else {
-                setTimeout(startBot, 3000);
+                fs.rmSync(AUTH_DIR, { recursive: true, force: true });
             }
+            setTimeout(startBot, 3000);
         } else if (connection === 'open') {
+            connected = true;
+            latestQR = null;
             console.log('✅ വാട്സ്ആപ്പ് ബോട്ട് വിജയകരമായി കണക്ട് ആയി!');
         }
     });
 
+    // ---- ഗ്രൂപ്പ് മെസ്സേജുകൾ: ലിങ്ക് ഉണ്ടെങ്കിൽ ഡിലീറ്റ് മാത്രം (മുന്നറിയിപ്പ് ഇല്ല) ----
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;            // പഴയ (history) മെസ്സേജുകൾ ഒഴിവാക്കുന്നു
 
@@ -173,7 +118,8 @@ async function startBot() {
 
                 if (!text || !hasBadLink(text)) continue;
 
-                console.log('അനാവശ്യ ലിങ്ക് കണ്ടെത്തി! ഡിലീറ്റ് ചെയ്യാൻ ശ്രമിക്കുന്നു...');
+                console.log('അനാവശ്യ ലിങ്ക് കണ്ടെത്തി! ഡിലീറ്റ് ചെയ്യുന്നു...');
+                await sleep(500 + Math.random() * 1500);          // 0.5–2 സെക്കൻഡ് താമസം
 
                 await sock.sendMessage(chat, {
                     delete: {
@@ -183,14 +129,6 @@ async function startBot() {
                         participant: msg.key.participant
                     }
                 });
-
-                const sender = msg.key.participant;
-                if (sender) {
-                    await sock.sendMessage(chat, {
-                        text: `⚠️ @${sender.split('@')[0]} ഈ ഗ്രൂപ്പിൽ ഗൂഗിൾ മാപ്പ് ലൊക്കേഷൻ ഒഴികെയുള്ള മറ്റ് ലിങ്കുകൾ അയക്കാൻ അനുവാദമില്ല!`,
-                        mentions: [sender]
-                    });
-                }
             } catch (err) {
                 console.log('Error handling message:', err.message);
             }

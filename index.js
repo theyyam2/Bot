@@ -12,13 +12,16 @@ app.listen(port, () => {
 
 const { default: makeWASocket, useMultiFileAuthState, disconnectReason } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
+const path = require('path');
 
 async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    // താൽക്കാലിക ഫോൾഡറിലേക്ക് സെഷൻ മാറ്റുന്നു
+    const { state, saveCreds } = await useMultiFileAuthState(path.join('/tmp', 'auth_info_baileys'));
     
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true
+        printQRInTerminal: true,
+        browser: ["Theyyam Bot", "Chrome", "1.0.0"]
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -32,10 +35,11 @@ async function startBot() {
         }
 
         if (connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== disconnectReason.loggedOut;
-            console.log('ക്ലോസ് ആയി, വീണ്ടും കണക്ട് ചെയ്യുന്നു...', shouldReconnect);
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== disconnectReason.loggedOut;
+            console.log('കണക്ഷൻ ക്ലോസ് ആയി, വീണ്ടും ശ്രമിക്കുന്നു...', shouldReconnect);
             if (shouldReconnect) {
-                startBot();
+                setTimeout(startBot, 3000);
             }
         } else if (connection === 'open') {
             console.log('✅ വാട്സ്ആപ്പ് ബോട്ട് വിജയകരമായി കണക്ട് ആയി!');
@@ -43,24 +47,23 @@ async function startBot() {
     });
 
     sock.ev.on('messages.upsert', async (m) => {
-        const msg = m.messages[0];
-        if (!msg || !msg.message || msg.key.fromMe) return;
+        try {
+            const msg = m.messages[0];
+            if (!msg || !msg.message || msg.key.fromMe) return;
 
-        const chat = msg.key.remoteJid;
-        // ഗ്രൂപ്പ് മെസേജ് ആണോ എന്ന് ഉറപ്പാക്കുന്നു
-        const isGroup = chat.endsWith('@g.us');
-        if (!isGroup) return;
+            const chat = msg.key.remoteJid;
+            const isGroup = chat.endsWith('@g.us');
+            if (!isGroup) return;
 
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+            const text = msg.message.conversation || 
+                         msg.message.extendedTextMessage?.text || 
+                         msg.message.imageMessage?.caption || "";
 
-        // ലിങ്കുകൾ പരിശോധിക്കുന്നു
-        const hasLink = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi.test(text);
-        // ഗൂഗിൾ മാപ്പ് ഒഴിവാക്കുന്നു
-        const isGoogleMap = /maps\.google\.com|maps\.app\.goo\.gl/gi.test(text);
+            const hasLink = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi.test(text);
+            const isGoogleMap = /maps\.google\.com|maps\.app\.goo\.gl/gi.test(text);
 
-        if (hasLink && !isGoogleMap) {
-            try {
-                // ലിങ്ക് അയച്ച മെസേജ് ഡിലീറ്റ് ചെയ്യുന്നു
+            if (hasLink && !isGoogleMap) {
+                // സന്ദേശം ഡിലീറ്റ് ചെയ്യുന്നു
                 await sock.sendMessage(chat, { 
                     delete: {
                         remoteJid: chat,
@@ -70,7 +73,7 @@ async function startBot() {
                     }
                 });
 
-                // മുന്നറിയിപ്പ് സന്ദേശം അയക്കുന്നു
+                // വാണിംഗ് അയക്കുന്നു
                 const sender = msg.key.participant;
                 if (sender) {
                     await sock.sendMessage(chat, {
@@ -78,9 +81,9 @@ async function startBot() {
                         mentions: [sender]
                     });
                 }
-            } catch (err) {
-                console.log("ഡിലീറ്റ് ചെയ്യാൻ കഴിഞ്ഞില്ല: ", err.message);
             }
+        } catch (err) {
+            console.log("Error handling message:", err.message);
         }
     });
 }
